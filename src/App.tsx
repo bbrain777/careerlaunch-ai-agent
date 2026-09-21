@@ -20,22 +20,6 @@ type Task = {
   done: boolean;
 };
 
-const seedApplications: Application[] = [
-  { id: 1, company: "Linear", role: "Product Designer", location: "Remote · Worldwide", status: "Interview", logo: "L", tone: "purple", updated: "Updated today" },
-  { id: 2, company: "Notion", role: "Senior UX Designer", location: "San Francisco · Hybrid", status: "Applied", logo: "N", tone: "ink", updated: "Applied 2 days ago" },
-  { id: 3, company: "Vercel", role: "Product Designer", location: "Remote · US", status: "Preparing", logo: "▲", tone: "dark", updated: "Draft ready" },
-  { id: 4, company: "Figma", role: "Design Systems Lead", location: "New York · Hybrid", status: "Saved", logo: "F", tone: "orange", updated: "Saved yesterday" },
-  { id: 5, company: "Stripe", role: "Senior Product Designer", location: "Dublin · Hybrid", status: "Offer", logo: "S", tone: "blue", updated: "Offer received" },
-  { id: 6, company: "Airbnb", role: "Experience Designer", location: "Remote · Europe", status: "Saved", logo: "A", tone: "pink", updated: "Saved 3 days ago" },
-];
-
-const initialTasks: Task[] = [
-  { id: 1, title: "Prepare for Linear interview", meta: "Today · 2:00 PM", priority: "High", done: false },
-  { id: 2, title: "Send thank-you note to Maya", meta: "Today · Follow-up", priority: "Medium", done: false },
-  { id: 3, title: "Review Vercel application draft", meta: "Tomorrow · AI draft ready", priority: "High", done: false },
-  { id: 4, title: "Research Figma design team", meta: "Friday · Career readiness", priority: "Low", done: false },
-];
-
 const navItems = [
   ["⌂", "Overview"],
   ["▣", "Applications"],
@@ -44,79 +28,128 @@ const navItems = [
   ["✓", "Tasks"],
 ];
 
-function useStoredState<T>(key: string, initialValue: T) {
-  const [value, setValue] = useState<T>(() => {
-    const stored = window.localStorage.getItem(key);
-    if (!stored) return initialValue;
-    try {
-      return JSON.parse(stored) as T;
-    } catch {
-      return initialValue;
-    }
+type User = { id: number; name: string; email: string };
+type ApiResponse = { token: string; user: User };
+
+async function apiRequest<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
+  const response = await fetch(path, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options.headers },
   });
-
-  useEffect(() => {
-    window.localStorage.setItem(key, JSON.stringify(value));
-  }, [key, value]);
-
-  return [value, setValue] as const;
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || "Something went wrong");
+  return payload as T;
 }
 
 function App() {
+  const [token, setToken] = useState(() => window.localStorage.getItem("careerlaunch-token"));
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(Boolean(token));
+  const [authError, setAuthError] = useState("");
   const [activeNav, setActiveNav] = useState("Overview");
   const [activeFilter, setActiveFilter] = useState<"All" | Status>("All");
-  const [applications, setApplications] = useStoredState("careerlaunch-applications", seedApplications);
-  const [tasks, setTasks] = useStoredState("careerlaunch-tasks", initialTasks);
+  const [applications, setApplications] = useState<Application[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [dataLoading, setDataLoading] = useState(false);
+  const [dataError, setDataError] = useState("");
   const [showTaskForm, setShowTaskForm] = useState(false);
   const [showApplicationForm, setShowApplicationForm] = useState(false);
   const [newTask, setNewTask] = useState("");
   const [newApplication, setNewApplication] = useState({ role: "", company: "", location: "", status: "Saved" as Status });
 
+  useEffect(() => {
+    if (!token) {
+      setAuthLoading(false);
+      return;
+    }
+    apiRequest<{ user: User }>("/api/me", {}, token)
+      .then(({ user: currentUser }) => setUser(currentUser))
+      .catch(() => {
+        window.localStorage.removeItem("careerlaunch-token");
+        setToken(null);
+      })
+      .finally(() => setAuthLoading(false));
+  }, [token]);
+
+  useEffect(() => {
+    if (!token || !user) return;
+    setDataLoading(true);
+    Promise.all([
+      apiRequest<Application[]>("/api/applications", {}, token),
+      apiRequest<Task[]>("/api/tasks", {}, token),
+    ])
+      .then(([loadedApplications, loadedTasks]) => {
+        setApplications(loadedApplications);
+        setTasks(loadedTasks.map((task) => ({ ...task, done: Boolean(task.done) })));
+        setDataError("");
+      })
+      .catch((error: Error) => setDataError(error.message))
+      .finally(() => setDataLoading(false));
+  }, [token, user]);
+
   const filteredApplications = useMemo(
     () => activeFilter === "All" ? applications : applications.filter((item) => item.status === activeFilter),
-    [activeFilter],
+    [activeFilter, applications],
   );
 
+  if (authLoading) return <div className="auth-screen"><div className="auth-card"><div className="brand"><span className="brand-mark">✦</span><span>CareerLaunch</span><span className="brand-ai">AI</span></div><p className="loading-message">Loading your workspace...</p></div></div>;
+  if (!token || !user) return <AuthScreen onAuthenticated={(session) => { window.localStorage.setItem("careerlaunch-token", session.token); setToken(session.token); setUser(session.user); }} />;
+
   const toggleTask = (id: number) => {
-    setTasks((current) => current.map((task) => task.id === id ? { ...task, done: !task.done } : task));
+    const task = tasks.find((item) => item.id === id);
+    if (!task || !token) return;
+    const done = !task.done;
+    setTasks((current) => current.map((item) => item.id === id ? { ...item, done } : item));
+    apiRequest(`/api/tasks/${id}`, { method: "PATCH", body: JSON.stringify({ done }) }, token).catch(() => setDataError("Could not update that task."));
   };
 
-  const addTask = (event: FormEvent) => {
+  const addTask = async (event: FormEvent) => {
     event.preventDefault();
-    if (!newTask.trim()) return;
-    setTasks((current) => [{ id: Date.now(), title: newTask.trim(), meta: "Today · Added manually", priority: "Medium", done: false }, ...current]);
+    if (!newTask.trim() || !token) return;
+    try {
+      const task = await apiRequest<Task>("/api/tasks", { method: "POST", body: JSON.stringify({ title: newTask.trim() }) }, token);
+      setTasks((current) => [{ ...task, done: Boolean(task.done) }, ...current]);
+    } catch (error) {
+      setDataError((error as Error).message);
+      return;
+    }
     setNewTask("");
     setShowTaskForm(false);
   };
 
-  const addApplication = (event: FormEvent) => {
+  const addApplication = async (event: FormEvent) => {
     event.preventDefault();
-    if (!newApplication.role.trim() || !newApplication.company.trim()) return;
+    if (!newApplication.role.trim() || !newApplication.company.trim() || !token) return;
     const toneByCompany = ["purple", "blue", "orange", "pink", "ink"];
-    const application: Application = {
-      id: Date.now(),
-      ...newApplication,
-      role: newApplication.role.trim(),
-      company: newApplication.company.trim(),
-      location: newApplication.location.trim() || "Location not added",
-      logo: newApplication.company.trim().slice(0, 1).toUpperCase(),
-      tone: toneByCompany[applications.length % toneByCompany.length],
-      updated: "Added just now",
-    };
-    setApplications((current) => [application, ...current]);
+    try {
+      const application = await apiRequest<Application>("/api/applications", { method: "POST", body: JSON.stringify({ ...newApplication, tone: toneByCompany[applications.length % toneByCompany.length] }) }, token);
+      setApplications((current) => [application, ...current]);
+    } catch (error) {
+      setDataError((error as Error).message);
+      return;
+    }
     setNewApplication({ role: "", company: "", location: "", status: "Saved" });
     setShowApplicationForm(false);
   };
 
   const updateApplicationStatus = (id: number, status: Status) => {
     setApplications((current) => current.map((application) => application.id === id ? { ...application, status, updated: "Updated just now" } : application));
+    if (token) apiRequest(`/api/applications/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }, token).catch(() => setDataError("Could not update that application."));
+  };
+
+  const signOut = () => {
+    window.localStorage.removeItem("careerlaunch-token");
+    setToken(null);
+    setUser(null);
+    setApplications([]);
+    setTasks([]);
   };
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">✦</span><span>CareerLaunch</span><span className="brand-ai">AI</span></div>
-        <div className="workspace-switcher"><div className="avatar avatar-green">OA</div><div><strong>Olakunle&apos;s workspace</strong><small>Personal workspace</small></div><span className="chevron">⌄</span></div>
+        <div className="workspace-switcher"><div className="avatar avatar-green">{user.name.slice(0, 2).toUpperCase()}</div><div><strong>{user.name}&apos;s workspace</strong><small>Personal workspace</small></div><span className="chevron">⌄</span></div>
         <nav className="main-nav" aria-label="Main navigation">
           <span className="nav-label">Workspace</span>
           {navItems.map(([icon, label]) => <button className={`nav-item ${activeNav === label ? "active" : ""}`} key={label} onClick={() => setActiveNav(label)}><span className="nav-icon">{icon}</span>{label}{label === "Tasks" && <span className="nav-count">{tasks.filter((task) => !task.done).length}</span>}</button>)}
@@ -125,13 +158,15 @@ function App() {
           <button className="nav-item"><span className="nav-icon">◒</span>Reports</button>
           <button className="nav-item"><span className="nav-icon">⚙</span>Settings</button>
         </nav>
-        <div className="sidebar-bottom"><div className="sync-card"><div className="sync-icon">↻</div><div><strong>All sources synced</strong><small>Last synced 8 min ago</small></div><span className="status-dot" /></div><div className="profile"><div className="avatar avatar-blue">OA</div><div><strong>Olakunle Obademi</strong><small>View profile</small></div><span className="more">•••</span></div></div>
+        <div className="sidebar-bottom"><div className="sync-card"><div className="sync-icon">↻</div><div><strong>API connected</strong><small>Data saved securely</small></div><span className="status-dot" /></div><div className="profile"><div className="avatar avatar-blue">{user.name.slice(0, 2).toUpperCase()}</div><div><strong>{user.name}</strong><small>{user.email}</small></div><button className="sign-out" onClick={signOut}>↪</button></div></div>
       </aside>
 
       <main className="main-content">
-        <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span>/</span><strong>{activeNav}</strong></div><div className="top-actions"><button className="icon-button" aria-label="Search">⌕</button><button className="icon-button notification" aria-label="Notifications">♧<i /></button><div className="avatar avatar-blue">OA</div></div></header>
+        <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span>/</span><strong>{activeNav}</strong></div><div className="top-actions"><button className="icon-button" aria-label="Search">⌕</button><button className="icon-button notification" aria-label="Notifications">♧<i /></button><div className="avatar avatar-blue">{user.name.slice(0, 2).toUpperCase()}</div></div></header>
         <div className="content-wrap">
-          <section className="welcome-row"><div><p className="eyebrow">Monday, September 21, 2026</p><h1>Good morning, Olakunle <span>✦</span></h1><p className="subtitle">Here&apos;s what&apos;s happening with your career journey.</p></div><button className="primary-button" onClick={() => setShowTaskForm(true)}><span>＋</span> Add task</button></section>
+          {dataLoading && <div className="sync-banner">Loading your saved applications and tasks...</div>}
+          {dataError && <div className="error-banner" role="alert">{dataError}<button onClick={() => setDataError("")}>×</button></div>}
+          <section className="welcome-row"><div><p className="eyebrow">Monday, September 21, 2026</p><h1>Good morning, {user.name.split(" ")[0]} <span>✦</span></h1><p className="subtitle">Here&apos;s what&apos;s happening with your career journey.</p></div><button className="primary-button" onClick={() => setShowTaskForm(true)}><span>＋</span> Add task</button></section>
 
           <section className="metrics-grid" aria-label="Career overview">
             <Metric icon="▣" label="Active applications" value={String(applications.length)} change="+3" context="vs. last month" tone="purple" />
@@ -166,6 +201,29 @@ function App() {
       {showApplicationForm && <div className="modal-backdrop" onClick={() => setShowApplicationForm(false)}><form className="task-modal" onSubmit={addApplication} onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">New opportunity</p><h2>Add application</h2></div><button type="button" className="close-button" onClick={() => setShowApplicationForm(false)}>×</button></div><div className="form-grid"><label htmlFor="application-role">Role<input id="application-role" autoFocus value={newApplication.role} onChange={(event) => setNewApplication({ ...newApplication, role: event.target.value })} placeholder="e.g. Product Designer" /></label><label htmlFor="application-company">Company<input id="application-company" value={newApplication.company} onChange={(event) => setNewApplication({ ...newApplication, company: event.target.value })} placeholder="e.g. Acme" /></label><label htmlFor="application-location">Location<input id="application-location" value={newApplication.location} onChange={(event) => setNewApplication({ ...newApplication, location: event.target.value })} placeholder="e.g. Remote · Europe" /></label><label htmlFor="application-status">Stage<select id="application-status" value={newApplication.status} onChange={(event) => setNewApplication({ ...newApplication, status: event.target.value as Status })}>{(["Saved", "Preparing", "Applied", "Interview", "Offer"] as Status[]).map((status) => <option key={status}>{status}</option>)}</select></label></div><div className="modal-actions"><button type="button" className="outline-button" onClick={() => setShowApplicationForm(false)}>Cancel</button><button className="primary-button" type="submit">Add application</button></div></form></div>}
     </div>
   );
+}
+
+function AuthScreen({ onAuthenticated }: { onAuthenticated: (session: ApiResponse) => void }) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [form, setForm] = useState({ name: "", email: "", password: "" });
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError("");
+    try {
+      const session = await apiRequest<ApiResponse>(`/api/auth/${mode}`, { method: "POST", body: JSON.stringify(form) });
+      onAuthenticated(session);
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return <div className="auth-screen"><div className="auth-card"><div className="auth-brand"><div className="brand"><span className="brand-mark">✦</span><span>CareerLaunch</span><span className="brand-ai">AI</span></div><p>Turn a fragmented job search into one organized workspace.</p></div><div className="auth-toggle"><button className={mode === "login" ? "selected" : ""} onClick={() => setMode("login")}>Sign in</button><button className={mode === "register" ? "selected" : ""} onClick={() => setMode("register")}>Create account</button></div><form onSubmit={submit} className="auth-form">{mode === "register" && <label htmlFor="auth-name">Your name<input id="auth-name" required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Olakunle Obademi" /></label>}<label htmlFor="auth-email">Email address<input id="auth-email" required type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="you@example.com" /></label><label htmlFor="auth-password">Password<input id="auth-password" required type="password" minLength={8} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder="At least 8 characters" /></label>{error && <div className="auth-error" role="alert">{error}</div>}<button className="primary-button auth-submit" disabled={submitting}>{submitting ? "Connecting..." : mode === "login" ? "Sign in to workspace" : "Create my workspace"}</button></form><small className="auth-note">Your records are scoped to your account and protected by the CareerLaunch API.</small></div></div>;
 }
 
 function Metric({ icon, label, value, change, context, tone }: { icon: string; label: string; value: string; change: string; context: string; tone: string }) {

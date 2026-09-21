@@ -1,4 +1,4 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type Status = "Saved" | "Preparing" | "Applied" | "Interview" | "Offer";
 type Application = {
@@ -20,7 +20,7 @@ type Task = {
   done: boolean;
 };
 
-const applications: Application[] = [
+const seedApplications: Application[] = [
   { id: 1, company: "Linear", role: "Product Designer", location: "Remote · Worldwide", status: "Interview", logo: "L", tone: "purple", updated: "Updated today" },
   { id: 2, company: "Notion", role: "Senior UX Designer", location: "San Francisco · Hybrid", status: "Applied", logo: "N", tone: "ink", updated: "Applied 2 days ago" },
   { id: 3, company: "Vercel", role: "Product Designer", location: "Remote · US", status: "Preparing", logo: "▲", tone: "dark", updated: "Draft ready" },
@@ -44,12 +44,33 @@ const navItems = [
   ["✓", "Tasks"],
 ];
 
+function useStoredState<T>(key: string, initialValue: T) {
+  const [value, setValue] = useState<T>(() => {
+    const stored = window.localStorage.getItem(key);
+    if (!stored) return initialValue;
+    try {
+      return JSON.parse(stored) as T;
+    } catch {
+      return initialValue;
+    }
+  });
+
+  useEffect(() => {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  }, [key, value]);
+
+  return [value, setValue] as const;
+}
+
 function App() {
   const [activeNav, setActiveNav] = useState("Overview");
   const [activeFilter, setActiveFilter] = useState<"All" | Status>("All");
-  const [tasks, setTasks] = useState(initialTasks);
+  const [applications, setApplications] = useStoredState("careerlaunch-applications", seedApplications);
+  const [tasks, setTasks] = useStoredState("careerlaunch-tasks", initialTasks);
   const [showTaskForm, setShowTaskForm] = useState(false);
+  const [showApplicationForm, setShowApplicationForm] = useState(false);
   const [newTask, setNewTask] = useState("");
+  const [newApplication, setNewApplication] = useState({ role: "", company: "", location: "", status: "Saved" as Status });
 
   const filteredApplications = useMemo(
     () => activeFilter === "All" ? applications : applications.filter((item) => item.status === activeFilter),
@@ -68,6 +89,29 @@ function App() {
     setShowTaskForm(false);
   };
 
+  const addApplication = (event: FormEvent) => {
+    event.preventDefault();
+    if (!newApplication.role.trim() || !newApplication.company.trim()) return;
+    const toneByCompany = ["purple", "blue", "orange", "pink", "ink"];
+    const application: Application = {
+      id: Date.now(),
+      ...newApplication,
+      role: newApplication.role.trim(),
+      company: newApplication.company.trim(),
+      location: newApplication.location.trim() || "Location not added",
+      logo: newApplication.company.trim().slice(0, 1).toUpperCase(),
+      tone: toneByCompany[applications.length % toneByCompany.length],
+      updated: "Added just now",
+    };
+    setApplications((current) => [application, ...current]);
+    setNewApplication({ role: "", company: "", location: "", status: "Saved" });
+    setShowApplicationForm(false);
+  };
+
+  const updateApplicationStatus = (id: number, status: Status) => {
+    setApplications((current) => current.map((application) => application.id === id ? { ...application, status, updated: "Updated just now" } : application));
+  };
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -75,7 +119,7 @@ function App() {
         <div className="workspace-switcher"><div className="avatar avatar-green">OA</div><div><strong>Olakunle&apos;s workspace</strong><small>Personal workspace</small></div><span className="chevron">⌄</span></div>
         <nav className="main-nav" aria-label="Main navigation">
           <span className="nav-label">Workspace</span>
-          {navItems.map(([icon, label]) => <button className={`nav-item ${activeNav === label ? "active" : ""}`} key={label} onClick={() => setActiveNav(label)}><span className="nav-icon">{icon}</span>{label}{label === "Tasks" && <span className="nav-count">4</span>}</button>)}
+          {navItems.map(([icon, label]) => <button className={`nav-item ${activeNav === label ? "active" : ""}`} key={label} onClick={() => setActiveNav(label)}><span className="nav-icon">{icon}</span>{label}{label === "Tasks" && <span className="nav-count">{tasks.filter((task) => !task.done).length}</span>}</button>)}
           <span className="nav-label nav-label-spaced">Manage</span>
           <button className="nav-item"><span className="nav-icon">▤</span>Documents</button>
           <button className="nav-item"><span className="nav-icon">◒</span>Reports</button>
@@ -90,17 +134,17 @@ function App() {
           <section className="welcome-row"><div><p className="eyebrow">Monday, September 21, 2026</p><h1>Good morning, Olakunle <span>✦</span></h1><p className="subtitle">Here&apos;s what&apos;s happening with your career journey.</p></div><button className="primary-button" onClick={() => setShowTaskForm(true)}><span>＋</span> Add task</button></section>
 
           <section className="metrics-grid" aria-label="Career overview">
-            <Metric icon="▣" label="Active applications" value="12" change="+3" context="vs. last month" tone="purple" />
-            <Metric icon="◉" label="Interviews" value="3" change="+1" context="this month" tone="blue" />
-            <Metric icon="✦" label="Offers" value="1" change="+1" context="this month" tone="orange" />
+            <Metric icon="▣" label="Active applications" value={String(applications.length)} change="+3" context="vs. last month" tone="purple" />
+            <Metric icon="◉" label="Interviews" value={String(applications.filter((item) => item.status === "Interview").length)} change="+1" context="this month" tone="blue" />
+            <Metric icon="✦" label="Offers" value={String(applications.filter((item) => item.status === "Offer").length)} change="+1" context="this month" tone="orange" />
             <Metric icon="↗" label="Response rate" value="42%" change="+8%" context="vs. last month" tone="green" />
           </section>
 
           <section className="dashboard-grid">
             <div className="panel pipeline-panel">
-              <div className="panel-heading"><div><h2>Application pipeline</h2><p>Keep an eye on every opportunity.</p></div><button className="text-button">View all <span>→</span></button></div>
-              <div className="pipeline-tabs">{(["All", "Saved", "Preparing", "Applied", "Interview", "Offer"] as const).map((filter) => <button key={filter} className={activeFilter === filter ? "selected" : ""} onClick={() => setActiveFilter(filter)}>{filter}{filter === "All" && <span className="tab-count">12</span>}</button>)}</div>
-              <div className="application-list">{filteredApplications.slice(0, 4).map((application) => <ApplicationRow key={application.id} application={application} />)}</div>
+              <div className="panel-heading"><div><h2>Application pipeline</h2><p>Keep an eye on every opportunity.</p></div><button className="text-button" onClick={() => setShowApplicationForm(true)}>Add application <span>＋</span></button></div>
+              <div className="pipeline-tabs">{(["All", "Saved", "Preparing", "Applied", "Interview", "Offer"] as const).map((filter) => <button key={filter} className={activeFilter === filter ? "selected" : ""} onClick={() => setActiveFilter(filter)}>{filter}{filter === "All" && <span className="tab-count">{applications.length}</span>}</button>)}</div>
+              <div className="application-list">{filteredApplications.slice(0, 4).map((application) => <ApplicationRow key={application.id} application={application} onStatusChange={updateApplicationStatus} />)}</div>
               {filteredApplications.length === 0 && <div className="empty-state">No applications in this stage yet.</div>}
             </div>
 
@@ -119,6 +163,7 @@ function App() {
         </div>
       </main>
       {showTaskForm && <div className="modal-backdrop" onClick={() => setShowTaskForm(false)}><form className="task-modal" onSubmit={addTask} onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">New reminder</p><h2>Add a task</h2></div><button type="button" className="close-button" onClick={() => setShowTaskForm(false)}>×</button></div><label htmlFor="task-title">What needs to be done?</label><input id="task-title" autoFocus value={newTask} onChange={(event) => setNewTask(event.target.value)} placeholder="e.g. Follow up with recruiter" /><div className="modal-actions"><button type="button" className="outline-button" onClick={() => setShowTaskForm(false)}>Cancel</button><button className="primary-button" type="submit">Create task</button></div></form></div>}
+      {showApplicationForm && <div className="modal-backdrop" onClick={() => setShowApplicationForm(false)}><form className="task-modal" onSubmit={addApplication} onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">New opportunity</p><h2>Add application</h2></div><button type="button" className="close-button" onClick={() => setShowApplicationForm(false)}>×</button></div><div className="form-grid"><label htmlFor="application-role">Role<input id="application-role" autoFocus value={newApplication.role} onChange={(event) => setNewApplication({ ...newApplication, role: event.target.value })} placeholder="e.g. Product Designer" /></label><label htmlFor="application-company">Company<input id="application-company" value={newApplication.company} onChange={(event) => setNewApplication({ ...newApplication, company: event.target.value })} placeholder="e.g. Acme" /></label><label htmlFor="application-location">Location<input id="application-location" value={newApplication.location} onChange={(event) => setNewApplication({ ...newApplication, location: event.target.value })} placeholder="e.g. Remote · Europe" /></label><label htmlFor="application-status">Stage<select id="application-status" value={newApplication.status} onChange={(event) => setNewApplication({ ...newApplication, status: event.target.value as Status })}>{(["Saved", "Preparing", "Applied", "Interview", "Offer"] as Status[]).map((status) => <option key={status}>{status}</option>)}</select></label></div><div className="modal-actions"><button type="button" className="outline-button" onClick={() => setShowApplicationForm(false)}>Cancel</button><button className="primary-button" type="submit">Add application</button></div></form></div>}
     </div>
   );
 }
@@ -127,8 +172,8 @@ function Metric({ icon, label, value, change, context, tone }: { icon: string; l
   return <div className="metric-card"><div className={`metric-icon ${tone}`}>{icon}</div><div className="metric-copy"><span>{label}</span><div><strong>{value}</strong><em className={tone}>{change}</em></div><small>{context}</small></div><span className="metric-arrow">↗</span></div>;
 }
 
-function ApplicationRow({ application }: { application: Application }) {
-  return <div className="application-row"><div className={`company-logo ${application.tone}`}>{application.logo}</div><div className="application-copy"><strong>{application.role}</strong><span>{application.company} <b>·</b> {application.location}</span></div><span className={`status-pill ${application.status.toLowerCase()}`}>{application.status}</span><span className="row-more">•••</span></div>;
+function ApplicationRow({ application, onStatusChange }: { application: Application; onStatusChange: (id: number, status: Status) => void }) {
+  return <div className="application-row"><div className={`company-logo ${application.tone}`}>{application.logo}</div><div className="application-copy"><strong>{application.role}</strong><span>{application.company} <b>·</b> {application.location}</span></div><select className={`status-pill status-select ${application.status.toLowerCase()}`} value={application.status} aria-label={`Update ${application.company} status`} onChange={(event) => onStatusChange(application.id, event.target.value as Status)}>{(["Saved", "Preparing", "Applied", "Interview", "Offer"] as Status[]).map((status) => <option key={status}>{status}</option>)}</select><span className="row-more">•••</span></div>;
 }
 
 function PriorityCard({ icon, title, description, action, tone }: { icon: string; title: string; description: string; action: string; tone: string }) {

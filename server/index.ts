@@ -48,6 +48,21 @@ db.exec(`
     done INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS source_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'Pending' CHECK(status IN ('Pending', 'Approved', 'Ignored')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, provider, external_id)
+  );
 `);
 
 app.use(cors());
@@ -125,6 +140,65 @@ app.post("/api/tasks", auth, (req: AuthRequest, res) => {
 app.patch("/api/tasks/:id", auth, (req: AuthRequest, res) => {
   const result = db.prepare("UPDATE tasks SET done = ? WHERE id = ? AND user_id = ?").run(req.body.done ? 1 : 0, req.params.id, req.userId);
   return result.changes ? res.json({ ok: true }) : res.status(404).json({ error: "Task not found" });
+});
+
+function classifyMessage(subject: string, body: string) {
+  const text = `${subject} ${body}`.toLowerCase();
+  if (/(interview|schedule.*call|meet with us)/.test(text)) return { type: "Interview invitation", confidence: 0.95 };
+  if (/(offer|pleased to offer|congratulations)/.test(text)) return { type: "Offer", confidence: 0.93 };
+  if (/(unfortunately|rejection|not moving forward)/.test(text)) return { type: "Rejection", confidence: 0.94 };
+  if (/(application.*received|thank you for applying|application submitted)/.test(text)) return { type: "Application confirmation", confidence: 0.91 };
+  if (/(job alert|new opening|we are hiring|vacancy|role at)/.test(text)) return { type: "Job alert", confidence: 0.78 };
+  if (/(recruiter|talent acquisition|hiring manager)/.test(text)) return { type: "Recruiter message", confidence: 0.75 };
+  return { type: "Other", confidence: 0.2 };
+}
+
+function extractOpportunity(subject: string, body: string) {
+  const text = `${subject}\n${body}`;
+  const company = text.match(/(?:at|from|with)\s+([A-Z][A-Za-z0-9&.' -]{2,40})/i)?.[1]?.trim();
+  const role = text.match(/(?:role|position|job title|application for)[:\s]+([A-Za-z][A-Za-z0-9 /&-]{2,60})/i)?.[1]?.trim();
+  return { company: company?.replace(/[.,]$/, ""), role: role?.replace(/[.,]$/, "") };
+}
+
+app.post("/api/source-messages/ingest", auth, (req: AuthRequest, res) => {
+  const { provider = "Manual import", externalId, sender, subject, body, receivedAt = new Date().toISOString() } = req.body as {
+    provider?: string; externalId?: string; sender?: string; subject?: string; body?: string; receivedAt?: string;
+  };
+  if (!externalId?.trim() || !sender?.trim() || !subject?.trim() || !body?.trim()) {
+    return res.status(400).json({ error: "External ID, sender, subject, and body are required" });
+  }
+  const classification = classifyMessage(subject, body);
+  const opportunity = extractOpportunity(subject, body);
+  try {
+    const result = db.prepare(`
+      INSERT INTO source_messages (user_id, provider, external_id, sender, subject, body, received_at, message_type, confidence)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(req.userId, provider.trim(), externalId.trim(), sender.trim(), subject.trim(), body.trim(), receivedAt, classification.type, classification.confidence);
+    return res.status(201).json({
+      id: result.lastInsertRowid,
+      provider, externalId, sender, subject, receivedAt,
+      messageType: classification.type, confidence: classification.confidence,
+      opportunity, status: "Pending",
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("UNIQUE")) return res.status(409).json({ error: "This source message was already imported" });
+    return res.status(500).json({ error: "Could not import source message" });
+  }
+});
+
+app.get("/api/source-messages", auth, (req: AuthRequest, res) => {
+  return res.json(db.prepare(`
+    SELECT id, provider, external_id AS externalId, sender, subject, body, received_at AS receivedAt,
+      message_type AS messageType, confidence, status
+    FROM source_messages WHERE user_id = ? ORDER BY id DESC
+  `).all(req.userId));
+});
+
+app.patch("/api/source-messages/:id", auth, (req: AuthRequest, res) => {
+  const status = req.body.status;
+  if (!["Approved", "Ignored", "Pending"].includes(status)) return res.status(400).json({ error: "Invalid review status" });
+  const result = db.prepare("UPDATE source_messages SET status = ? WHERE id = ? AND user_id = ?").run(status, req.params.id, req.userId);
+  return result.changes ? res.json({ ok: true }) : res.status(404).json({ error: "Source message not found" });
 });
 
 app.listen(port, () => console.log(`CareerLaunch API listening on http://localhost:${port}`));

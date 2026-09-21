@@ -19,6 +19,18 @@ type Task = {
   priority: "High" | "Medium" | "Low";
   done: boolean;
 };
+type SourceMessage = {
+  id: number;
+  provider: string;
+  externalId: string;
+  sender: string;
+  subject: string;
+  body: string;
+  receivedAt: string;
+  messageType: string;
+  confidence: number;
+  status: "Pending" | "Approved" | "Ignored";
+};
 
 const navItems = [
   ["⌂", "Overview"],
@@ -50,10 +62,13 @@ function App() {
   const [activeFilter, setActiveFilter] = useState<"All" | Status>("All");
   const [applications, setApplications] = useState<Application[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [sourceMessages, setSourceMessages] = useState<SourceMessage[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
   const [dataError, setDataError] = useState("");
   const [showTaskForm, setShowTaskForm] = useState(false);
   const [showApplicationForm, setShowApplicationForm] = useState(false);
+  const [showImportForm, setShowImportForm] = useState(false);
+  const [newMessage, setNewMessage] = useState({ sender: "", subject: "", body: "" });
   const [newTask, setNewTask] = useState("");
   const [newApplication, setNewApplication] = useState({ role: "", company: "", location: "", status: "Saved" as Status });
 
@@ -77,10 +92,12 @@ function App() {
     Promise.all([
       apiRequest<Application[]>("/api/applications", {}, token),
       apiRequest<Task[]>("/api/tasks", {}, token),
+      apiRequest<SourceMessage[]>("/api/source-messages", {}, token),
     ])
-      .then(([loadedApplications, loadedTasks]) => {
+      .then(([loadedApplications, loadedTasks, loadedMessages]) => {
         setApplications(loadedApplications);
         setTasks(loadedTasks.map((task) => ({ ...task, done: Boolean(task.done) })));
+        setSourceMessages(loadedMessages);
         setDataError("");
       })
       .catch((error: Error) => setDataError(error.message))
@@ -137,6 +154,27 @@ function App() {
     if (token) apiRequest(`/api/applications/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }, token).catch(() => setDataError("Could not update that application."));
   };
 
+  const importMessage = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!token || !newMessage.sender.trim() || !newMessage.subject.trim() || !newMessage.body.trim()) return;
+    try {
+      const message = await apiRequest<SourceMessage>("/api/source-messages/ingest", {
+        method: "POST",
+        body: JSON.stringify({ ...newMessage, externalId: `manual-${Date.now()}` }),
+      }, token);
+      setSourceMessages((current) => [message, ...current]);
+      setNewMessage({ sender: "", subject: "", body: "" });
+      setShowImportForm(false);
+    } catch (error) {
+      setDataError((error as Error).message);
+    }
+  };
+
+  const reviewMessage = (id: number, status: SourceMessage["status"]) => {
+    setSourceMessages((current) => current.map((message) => message.id === id ? { ...message, status } : message));
+    if (token) apiRequest(`/api/source-messages/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }, token).catch(() => setDataError("Could not update that review."));
+  };
+
   const signOut = () => {
     window.localStorage.removeItem("careerlaunch-token");
     setToken(null);
@@ -162,7 +200,7 @@ function App() {
       </aside>
 
       <main className="main-content">
-        <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span>/</span><strong>{activeNav}</strong></div><div className="top-actions"><button className="icon-button" aria-label="Search">⌕</button><button className="icon-button notification" aria-label="Notifications">♧<i /></button><div className="avatar avatar-blue">{user.name.slice(0, 2).toUpperCase()}</div></div></header>
+        <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span>/</span><strong>{activeNav}</strong></div><div className="top-actions"><button className="icon-button" aria-label="Search">⌕</button><button className="icon-button notification" aria-label="Notifications">♧<i /></button><button className="import-link" onClick={() => setShowImportForm(true)}>Import email</button><div className="avatar avatar-blue">{user.name.slice(0, 2).toUpperCase()}</div></div></header>
         <div className="content-wrap">
           {dataLoading && <div className="sync-banner">Loading your saved applications and tasks...</div>}
           {dataError && <div className="error-banner" role="alert">{dataError}<button onClick={() => setDataError("")}>×</button></div>}
@@ -192,13 +230,14 @@ function App() {
 
           <section className="lower-grid">
             <div className="panel tasks-panel"><div className="panel-heading"><div><h2>Your tasks</h2><p>Stay on top of what&apos;s next.</p></div><button className="text-button" onClick={() => setShowTaskForm(true)}>Add task <span>＋</span></button></div><div className="task-list">{tasks.slice(0, 4).map((task) => <TaskRow task={task} key={task.id} onToggle={() => toggleTask(task.id)} />)}</div></div>
-            <div className="panel activity-panel"><div className="panel-heading"><div><h2>Recent activity</h2><p>Your latest career progress.</p></div><button className="text-button">See history <span>→</span></button></div><div className="activity-list"><Activity icon="✦" text={<><strong>AI draft generated</strong><span>Vercel cover letter is ready for review</span></>} time="10 min ago" tone="purple" /><Activity icon="↗" text={<><strong>Application updated</strong><span>Notion moved to Applied</span></>} time="2 hours ago" tone="blue" /><Activity icon="◷" text={<><strong>Interview added</strong><span>Linear · Tomorrow at 2:00 PM</span></>} time="Yesterday" tone="orange" /></div></div>
+            <div className="panel activity-panel"><div className="panel-heading"><div><h2>Source review queue</h2><p>Imported messages awaiting your review.</p></div><button className="text-button" onClick={() => setShowImportForm(true)}>Import email <span>＋</span></button></div><div className="activity-list">{sourceMessages.filter((message) => message.status === "Pending").slice(0, 3).map((message) => <SourceReview key={message.id} message={message} onReview={reviewMessage} />)}{sourceMessages.filter((message) => message.status === "Pending").length === 0 && <div className="empty-state">No messages need review.</div>}</div></div>
           </section>
           <footer><span>✦ CareerLaunch AI</span><span>Built to help you move forward.</span><span className="footer-links">Help&nbsp;&nbsp; Privacy&nbsp;&nbsp; Feedback</span></footer>
         </div>
       </main>
       {showTaskForm && <div className="modal-backdrop" onClick={() => setShowTaskForm(false)}><form className="task-modal" onSubmit={addTask} onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">New reminder</p><h2>Add a task</h2></div><button type="button" className="close-button" onClick={() => setShowTaskForm(false)}>×</button></div><label htmlFor="task-title">What needs to be done?</label><input id="task-title" autoFocus value={newTask} onChange={(event) => setNewTask(event.target.value)} placeholder="e.g. Follow up with recruiter" /><div className="modal-actions"><button type="button" className="outline-button" onClick={() => setShowTaskForm(false)}>Cancel</button><button className="primary-button" type="submit">Create task</button></div></form></div>}
       {showApplicationForm && <div className="modal-backdrop" onClick={() => setShowApplicationForm(false)}><form className="task-modal" onSubmit={addApplication} onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">New opportunity</p><h2>Add application</h2></div><button type="button" className="close-button" onClick={() => setShowApplicationForm(false)}>×</button></div><div className="form-grid"><label htmlFor="application-role">Role<input id="application-role" autoFocus value={newApplication.role} onChange={(event) => setNewApplication({ ...newApplication, role: event.target.value })} placeholder="e.g. Product Designer" /></label><label htmlFor="application-company">Company<input id="application-company" value={newApplication.company} onChange={(event) => setNewApplication({ ...newApplication, company: event.target.value })} placeholder="e.g. Acme" /></label><label htmlFor="application-location">Location<input id="application-location" value={newApplication.location} onChange={(event) => setNewApplication({ ...newApplication, location: event.target.value })} placeholder="e.g. Remote · Europe" /></label><label htmlFor="application-status">Stage<select id="application-status" value={newApplication.status} onChange={(event) => setNewApplication({ ...newApplication, status: event.target.value as Status })}>{(["Saved", "Preparing", "Applied", "Interview", "Offer"] as Status[]).map((status) => <option key={status}>{status}</option>)}</select></label></div><div className="modal-actions"><button type="button" className="outline-button" onClick={() => setShowApplicationForm(false)}>Cancel</button><button className="primary-button" type="submit">Add application</button></div></form></div>}
+      {showImportForm && <div className="modal-backdrop" onClick={() => setShowImportForm(false)}><form className="task-modal import-modal" onSubmit={importMessage} onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="eyebrow">Source ingestion</p><h2>Import an email</h2></div><button type="button" className="close-button" onClick={() => setShowImportForm(false)}>×</button></div><p className="modal-help">Paste a job alert, recruiter message, or application update. CareerLaunch will classify it and place it in your review queue.</p><label htmlFor="message-sender">Sender<input id="message-sender" required value={newMessage.sender} onChange={(event) => setNewMessage({ ...newMessage, sender: event.target.value })} placeholder="recruiter@company.com" /></label><label htmlFor="message-subject">Subject<input id="message-subject" required value={newMessage.subject} onChange={(event) => setNewMessage({ ...newMessage, subject: event.target.value })} placeholder="Interview invitation: Product Designer" /></label><label htmlFor="message-body">Message body<textarea id="message-body" required value={newMessage.body} onChange={(event) => setNewMessage({ ...newMessage, body: event.target.value })} placeholder="Paste the email content here..." rows={5} /></label><div className="modal-actions"><button type="button" className="outline-button" onClick={() => setShowImportForm(false)}>Cancel</button><button className="primary-button" type="submit">Classify message</button></div></form></div>}
     </div>
   );
 }
@@ -244,6 +283,10 @@ function TaskRow({ task, onToggle }: { task: Task; onToggle: () => void }) {
 
 function Activity({ icon, text, time, tone }: { icon: string; text: React.ReactNode; time: string; tone: string }) {
   return <div className="activity-row"><div className={`activity-icon ${tone}`}>{icon}</div><div className="activity-copy">{text}</div><time>{time}</time></div>;
+}
+
+function SourceReview({ message, onReview }: { message: SourceMessage; onReview: (id: number, status: SourceMessage["status"]) => void }) {
+  return <div className="source-review"><div className="activity-icon purple">✉</div><div className="source-review-copy"><strong>{message.subject}</strong><span>{message.messageType} · {Math.round(message.confidence * 100)}% confidence</span><small>{message.sender}</small><div><button onClick={() => onReview(message.id, "Approved")}>Approve</button><button onClick={() => onReview(message.id, "Ignored")}>Ignore</button></div></div></div>;
 }
 
 export default App;

@@ -55,16 +55,7 @@ async function apiRequest<T>(path: string, options: RequestInit = {}, token?: st
 }
 
 function App() {
-  const [token, setToken] = useState(() => {
-    const params = new URLSearchParams(window.location.search);
-    const googleToken = params.get("auth_token");
-    if (googleToken) {
-      window.localStorage.setItem("careerlaunch-token", googleToken);
-      window.history.replaceState({}, "", window.location.pathname);
-      return googleToken;
-    }
-    return window.localStorage.getItem("careerlaunch-token");
-  });
+  const [token, setToken] = useState(() => window.localStorage.getItem("careerlaunch-token"));
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(Boolean(token));
   const [authError, setAuthError] = useState("");
@@ -123,7 +114,7 @@ function App() {
   );
 
   if (authLoading) return <div className="auth-screen"><div className="auth-card"><div className="brand"><span className="brand-mark">✦</span><span>CareerLaunch</span><span className="brand-ai">AI</span></div><p className="loading-message">Loading your workspace...</p></div></div>;
-  if (!token || !user) return <AuthScreen onGoogleSignIn={signInWithGoogle} onAuthenticated={(session) => { window.localStorage.setItem("careerlaunch-token", session.token); setToken(session.token); setUser(session.user); }} />;
+  if (!token || !user) return <AuthScreen onAuthenticated={(session) => { window.localStorage.setItem("careerlaunch-token", session.token); setToken(session.token); setUser(session.user); }} />;
 
   const toggleTask = (id: number) => {
     const task = tasks.find((item) => item.id === id);
@@ -197,15 +188,6 @@ function App() {
       setDataError((error as Error).message);
     }
   };
-
-  async function signInWithGoogle() {
-    try {
-      const { url } = await apiRequest<{ url: string }>("/api/auth/google/start");
-      window.location.href = url;
-    } catch (error) {
-      setAuthError((error as Error).message);
-    }
-  }
 
   const syncGmail = async () => {
     if (!token) return;
@@ -286,7 +268,7 @@ function App() {
   );
 }
 
-function AuthScreen({ onAuthenticated, onGoogleSignIn }: { onAuthenticated: (session: ApiResponse) => void; onGoogleSignIn: () => void }) {
+function AuthScreen({ onAuthenticated }: { onAuthenticated: (session: ApiResponse) => void }) {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [form, setForm] = useState({ name: "", email: "", password: "" });
   const [error, setError] = useState("");
@@ -306,7 +288,7 @@ function AuthScreen({ onAuthenticated, onGoogleSignIn }: { onAuthenticated: (ses
     }
   };
 
-  return <div className="auth-screen"><div className="auth-card"><div className="auth-brand"><div className="brand"><span className="brand-mark">✦</span><span>CareerLaunch</span><span className="brand-ai">AI</span></div><p>Turn a fragmented job search into one organized workspace.</p></div><button className="google-button" onClick={onGoogleSignIn}><span className="google-g">G</span> Continue with Google</button><div className="auth-divider"><span>or use email</span></div><div className="auth-toggle"><button className={mode === "login" ? "selected" : ""} onClick={() => setMode("login")}>Sign in</button><button className={mode === "register" ? "selected" : ""} onClick={() => setMode("register")}>Create account</button></div><form onSubmit={submit} className="auth-form">{mode === "register" && <label htmlFor="auth-name">Your name<input id="auth-name" required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Olakunle Obademi" /></label>}<label htmlFor="auth-email">Email address<input id="auth-email" required type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="you@example.com" /></label><label htmlFor="auth-password">Password<input id="auth-password" required type="password" minLength={8} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder="At least 8 characters" /></label>{error && <div className="auth-error" role="alert">{error}</div>}<button className="primary-button auth-submit" disabled={submitting}>{submitting ? "Connecting..." : mode === "login" ? "Sign in to workspace" : "Create my workspace"}</button></form><small className="auth-note">Google sign-in uses your existing Google session. CareerLaunch never receives your Google password.</small></div></div>;
+  return <div className="auth-screen"><div className="auth-card"><div className="auth-brand"><div className="brand"><span className="brand-mark">✦</span><span>CareerLaunch</span><span className="brand-ai">AI</span></div><p>Turn a fragmented job search into one organized workspace.</p></div><div className="auth-toggle"><button className={mode === "login" ? "selected" : ""} onClick={() => setMode("login")}>Sign in</button><button className={mode === "register" ? "selected" : ""} onClick={() => setMode("register")}>Create account</button></div><form onSubmit={submit} className="auth-form">{mode === "register" && <label htmlFor="auth-name">Your name<input id="auth-name" required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Olakunle Obademi" /></label>}<label htmlFor="auth-email">Email address<input id="auth-email" required type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="you@example.com" /></label><label htmlFor="auth-password">Password<input id="auth-password" required type="password" minLength={8} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder="At least 8 characters" /></label>{error && <div className="auth-error" role="alert">{error}</div>}<button className="primary-button auth-submit" disabled={submitting}>{submitting ? "Connecting..." : mode === "login" ? "Sign in to workspace" : "Create my workspace"}</button></form><small className="auth-note">Your records are scoped to your account and protected by the CareerLaunch API.</small></div></div>;
 }
 
 function Metric({ icon, label, value, change, context, tone }: { icon: string; label: string; value: string; change: string; context: string; tone: string }) {

@@ -10,6 +10,7 @@ import crypto from "node:crypto";
 import { google } from "googleapis";
 
 type AuthRequest = Request & { userId?: number };
+type UserRecord = { id: number; name: string; email: string };
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
 const jwtSecret = process.env.JWT_SECRET;
@@ -98,6 +99,7 @@ function auth(req: AuthRequest, res: Response, next: NextFunction) {
   } catch {
     return res.status(401).json({ error: "Invalid or expired token" });
   }
+}
 
   function encrypt(value: string) {
     const iv = crypto.randomBytes(12);
@@ -186,11 +188,25 @@ function auth(req: AuthRequest, res: Response, next: NextFunction) {
     const { code, state } = req.query;
     if (typeof code !== "string" || typeof state !== "string") return res.status(400).send("Missing OAuth callback parameters.");
     try {
-      const { userId } = jwt.verify(state, jwtSecret) as { userId: number };
+      const statePayload = jwt.verify(state, jwtSecret) as { userId?: number; mode?: string };
       const client = gmailClient();
       const { tokens } = await client.getToken(code);
       if (!tokens.access_token) throw new Error("Google did not return an access token");
       client.setCredentials(tokens);
+      if (statePayload.mode === "login") {
+        const oauthProfile = await client.getTokenInfo(tokens.access_token);
+        const email = oauthProfile.email;
+        if (!email) throw new Error("Google did not return an email address");
+        const name = email.split("@")[0];
+        let user = db.prepare("SELECT id, name, email FROM users WHERE email = ?").get(email.toLowerCase()) as UserRecord | undefined;
+        if (!user) {
+          const result = db.prepare("INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)").run(name, email.toLowerCase(), await bcrypt.hash(crypto.randomBytes(32).toString("hex"), 12));
+          user = { id: Number(result.lastInsertRowid), name, email: email.toLowerCase() };
+        }
+        const appToken = jwt.sign({ userId: user.id }, jwtSecret, { expiresIn: "7d" });
+        return res.redirect(`${process.env.CLIENT_URL ?? "http://localhost:5173"}?auth_token=${encodeURIComponent(appToken)}`);
+      }
+      if (!statePayload.userId) throw new Error("OAuth state did not contain a user");
       const profile = await google.gmail({ version: "v1", auth: client }).users.getProfile({ userId: "me" });
       db.prepare(`
         INSERT INTO integration_connections (user_id, provider, account_email, encrypted_access_token, encrypted_refresh_token, scopes)
@@ -198,14 +214,12 @@ function auth(req: AuthRequest, res: Response, next: NextFunction) {
         ON CONFLICT(user_id, provider) DO UPDATE SET account_email = excluded.account_email,
           encrypted_access_token = excluded.encrypted_access_token, encrypted_refresh_token = excluded.encrypted_refresh_token,
           scopes = excluded.scopes, status = 'Connected'
-      `).run(userId, profile.data.emailAddress ?? null, encrypt(tokens.access_token), tokens.refresh_token ? encrypt(tokens.refresh_token) : null, (tokens.scope ?? "").toString());
+      `).run(statePayload.userId, profile.data.emailAddress ?? null, encrypt(tokens.access_token), tokens.refresh_token ? encrypt(tokens.refresh_token) : null, (tokens.scope ?? "").toString());
       return res.redirect(`${process.env.CLIENT_URL ?? "http://localhost:5173"}?integration=gmail-connected`);
     } catch {
       return res.redirect(`${process.env.CLIENT_URL ?? "http://localhost:5173"}?integration=gmail-error`);
     }
   });
-}
-
 app.post("/api/auth/register", async (req, res) => {
   const { name, email, password } = req.body as { name?: string; email?: string; password?: string };
   if (!name?.trim() || !email?.trim() || !password || password.length < 8) {
@@ -228,6 +242,21 @@ app.post("/api/auth/login", async (req, res) => {
   if (!user || !password || !(await bcrypt.compare(password, user.password_hash))) return res.status(401).json({ error: "Email or password is incorrect" });
   const token = jwt.sign({ userId: user.id }, jwtSecret, { expiresIn: "7d" });
   return res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
+});
+
+app.get("/api/auth/google/start", (req, res) => {
+  try {
+    const client = gmailClient();
+    const state = jwt.sign({ mode: "login" }, jwtSecret, { expiresIn: "10m" });
+    return res.json({ url: client.generateAuthUrl({
+      access_type: "offline",
+      prompt: "select_account",
+      scope: ["openid", "email", "profile"],
+      state,
+    }) });
+  } catch (error) {
+    return res.status(503).json({ error: error instanceof Error ? error.message : "Google sign-in is not configured" });
+  }
 });
 
 app.get("/api/me", auth, (req: AuthRequest, res) => {

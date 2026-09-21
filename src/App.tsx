@@ -31,6 +31,7 @@ type SourceMessage = {
   confidence: number;
   status: "Pending" | "Approved" | "Ignored";
 };
+type Integration = { provider: string; accountEmail?: string; status: string; lastSyncedAt?: string };
 
 const navItems = [
   ["⌂", "Overview"],
@@ -63,6 +64,7 @@ function App() {
   const [applications, setApplications] = useState<Application[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [sourceMessages, setSourceMessages] = useState<SourceMessage[]>([]);
+  const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
   const [dataError, setDataError] = useState("");
   const [showTaskForm, setShowTaskForm] = useState(false);
@@ -93,11 +95,13 @@ function App() {
       apiRequest<Application[]>("/api/applications", {}, token),
       apiRequest<Task[]>("/api/tasks", {}, token),
       apiRequest<SourceMessage[]>("/api/source-messages", {}, token),
+      apiRequest<Integration[]>("/api/integrations", {}, token),
     ])
-      .then(([loadedApplications, loadedTasks, loadedMessages]) => {
+      .then(([loadedApplications, loadedTasks, loadedMessages, loadedIntegrations]) => {
         setApplications(loadedApplications);
         setTasks(loadedTasks.map((task) => ({ ...task, done: Boolean(task.done) })));
         setSourceMessages(loadedMessages);
+        setIntegrations(loadedIntegrations);
         setDataError("");
       })
       .catch((error: Error) => setDataError(error.message))
@@ -175,6 +179,16 @@ function App() {
     if (token) apiRequest(`/api/source-messages/${id}`, { method: "PATCH", body: JSON.stringify({ status }) }, token).catch(() => setDataError("Could not update that review."));
   };
 
+  const connectGmail = async () => {
+    if (!token) return;
+    try {
+      const { url } = await apiRequest<{ url: string }>("/api/integrations/gmail/connect", {}, token);
+      window.location.href = url;
+    } catch (error) {
+      setDataError((error as Error).message);
+    }
+  };
+
   const signOut = () => {
     window.localStorage.removeItem("careerlaunch-token");
     setToken(null);
@@ -196,7 +210,7 @@ function App() {
           <button className="nav-item"><span className="nav-icon">◒</span>Reports</button>
           <button className="nav-item"><span className="nav-icon">⚙</span>Settings</button>
         </nav>
-        <div className="sidebar-bottom"><div className="sync-card"><div className="sync-icon">↻</div><div><strong>API connected</strong><small>Data saved securely</small></div><span className="status-dot" /></div><div className="profile"><div className="avatar avatar-blue">{user.name.slice(0, 2).toUpperCase()}</div><div><strong>{user.name}</strong><small>{user.email}</small></div><button className="sign-out" onClick={signOut}>↪</button></div></div>
+        <div className="sidebar-bottom"><div className="sync-card"><div className="sync-icon">↻</div><div><strong>{integrations.some((item) => item.provider === "gmail") ? "Gmail connected" : "Connect your sources"}</strong><small>{integrations.find((item) => item.provider === "gmail")?.accountEmail ?? "Import emails automatically"}</small></div><button className="connect-button" onClick={connectGmail}>{integrations.some((item) => item.provider === "gmail") ? "✓" : "＋"}</button></div><div className="profile"><div className="avatar avatar-blue">{user.name.slice(0, 2).toUpperCase()}</div><div><strong>{user.name}</strong><small>{user.email}</small></div><button className="sign-out" onClick={signOut}>↪</button></div></div>
       </aside>
 
       <main className="main-content">

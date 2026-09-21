@@ -6,14 +6,21 @@ import express, { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import path from "node:path";
 import { mkdirSync } from "node:fs";
+import crypto from "node:crypto";
+import { google } from "googleapis";
 
 type AuthRequest = Request & { userId?: number };
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
 const jwtSecret = process.env.JWT_SECRET;
+const appUrl = process.env.APP_URL ?? "http://localhost:3001";
+const tokenEncryptionKey = process.env.TOKEN_ENCRYPTION_KEY;
 
 if (!jwtSecret) {
   throw new Error("JWT_SECRET is required. Copy .env.example to .env before starting the API.");
+}
+if (!tokenEncryptionKey || Buffer.byteLength(tokenEncryptionKey) < 32) {
+  throw new Error("TOKEN_ENCRYPTION_KEY must be at least 32 bytes. Copy .env.example and set a secure key.");
 }
 
 mkdirSync(path.resolve("data"), { recursive: true });
@@ -63,6 +70,19 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, provider, external_id)
   );
+  CREATE TABLE IF NOT EXISTS integration_connections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    account_email TEXT,
+    encrypted_access_token TEXT NOT NULL,
+    encrypted_refresh_token TEXT,
+    scopes TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Connected',
+    last_synced_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, provider)
+  );
 `);
 
 app.use(cors());
@@ -78,6 +98,58 @@ function auth(req: AuthRequest, res: Response, next: NextFunction) {
   } catch {
     return res.status(401).json({ error: "Invalid or expired token" });
   }
+
+  function encrypt(value: string) {
+    const iv = crypto.randomBytes(12);
+    const key = crypto.createHash("sha256").update(tokenEncryptionKey).digest();
+    const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+    const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+    return `${iv.toString("hex")}:${cipher.getAuthTag().toString("hex")}:${encrypted.toString("hex")}`;
+  }
+
+  function gmailClient() {
+    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+      throw new Error("Google OAuth credentials are not configured");
+    }
+    return new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, process.env.GOOGLE_REDIRECT_URI ?? `${appUrl}/api/integrations/gmail/callback`);
+  }
+
+  app.get("/api/integrations", auth, (req: AuthRequest, res) => {
+    return res.json(db.prepare("SELECT provider, account_email AS accountEmail, status, last_synced_at AS lastSyncedAt FROM integration_connections WHERE user_id = ?").all(req.userId));
+  });
+
+  app.get("/api/integrations/gmail/connect", auth, (req: AuthRequest, res) => {
+    try {
+      const client = gmailClient();
+      const state = jwt.sign({ userId: req.userId }, jwtSecret, { expiresIn: "10m" });
+      return res.json({ url: client.generateAuthUrl({ access_type: "offline", prompt: "consent", scope: ["https://www.googleapis.com/auth/gmail.readonly"], state }) });
+    } catch (error) {
+      return res.status(503).json({ error: error instanceof Error ? error.message : "Gmail is not configured" });
+    }
+  });
+
+  app.get("/api/integrations/gmail/callback", async (req, res) => {
+    const { code, state } = req.query;
+    if (typeof code !== "string" || typeof state !== "string") return res.status(400).send("Missing OAuth callback parameters.");
+    try {
+      const { userId } = jwt.verify(state, jwtSecret) as { userId: number };
+      const client = gmailClient();
+      const { tokens } = await client.getToken(code);
+      if (!tokens.access_token) throw new Error("Google did not return an access token");
+      client.setCredentials(tokens);
+      const profile = await google.gmail({ version: "v1", auth: client }).users.getProfile({ userId: "me" });
+      db.prepare(`
+        INSERT INTO integration_connections (user_id, provider, account_email, encrypted_access_token, encrypted_refresh_token, scopes)
+        VALUES (?, 'gmail', ?, ?, ?, ?)
+        ON CONFLICT(user_id, provider) DO UPDATE SET account_email = excluded.account_email,
+          encrypted_access_token = excluded.encrypted_access_token, encrypted_refresh_token = excluded.encrypted_refresh_token,
+          scopes = excluded.scopes, status = 'Connected'
+      `).run(userId, profile.data.emailAddress ?? null, encrypt(tokens.access_token), tokens.refresh_token ? encrypt(tokens.refresh_token) : null, (tokens.scope ?? "").toString());
+      return res.redirect(`${process.env.CLIENT_URL ?? "http://localhost:5173"}?integration=gmail-connected`);
+    } catch {
+      return res.redirect(`${process.env.CLIENT_URL ?? "http://localhost:5173"}?integration=gmail-error`);
+    }
+  });
 }
 
 app.post("/api/auth/register", async (req, res) => {

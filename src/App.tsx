@@ -189,6 +189,18 @@ function App() {
     }
   };
 
+  const syncGmail = async () => {
+    if (!token) return;
+    try {
+      const result = await apiRequest<{ imported: number; skipped: number }>("/api/integrations/gmail/sync", { method: "POST" }, token);
+      const messages = await apiRequest<SourceMessage[]>("/api/source-messages", {}, token);
+      setSourceMessages(messages);
+      setDataError(`Gmail synced: ${result.imported} new, ${result.skipped} already imported.`);
+    } catch (error) {
+      setDataError((error as Error).message);
+    }
+  };
+
   const signOut = () => {
     window.localStorage.removeItem("careerlaunch-token");
     setToken(null);
@@ -210,7 +222,7 @@ function App() {
           <button className="nav-item"><span className="nav-icon">◒</span>Reports</button>
           <button className="nav-item"><span className="nav-icon">⚙</span>Settings</button>
         </nav>
-        <div className="sidebar-bottom"><div className="sync-card"><div className="sync-icon">↻</div><div><strong>{integrations.some((item) => item.provider === "gmail") ? "Gmail connected" : "Connect your sources"}</strong><small>{integrations.find((item) => item.provider === "gmail")?.accountEmail ?? "Import emails automatically"}</small></div><button className="connect-button" onClick={connectGmail}>{integrations.some((item) => item.provider === "gmail") ? "✓" : "＋"}</button></div><div className="profile"><div className="avatar avatar-blue">{user.name.slice(0, 2).toUpperCase()}</div><div><strong>{user.name}</strong><small>{user.email}</small></div><button className="sign-out" onClick={signOut}>↪</button></div></div>
+        <div className="sidebar-bottom"><div className="sync-card"><div className="sync-icon">↻</div><div><strong>{integrations.some((item) => item.provider === "gmail") ? "Gmail connected" : "Connect your sources"}</strong><small>{integrations.find((item) => item.provider === "gmail")?.accountEmail ?? "Import emails automatically"}</small></div>{integrations.some((item) => item.provider === "gmail") ? <button className="connect-button" onClick={syncGmail} aria-label="Sync Gmail">↻</button> : <button className="connect-button" onClick={connectGmail} aria-label="Connect Gmail">＋</button>}</div><div className="profile"><div className="avatar avatar-blue">{user.name.slice(0, 2).toUpperCase()}</div><div><strong>{user.name}</strong><small>{user.email}</small></div><button className="sign-out" onClick={signOut}>↪</button></div></div>
       </aside>
 
       <main className="main-content">

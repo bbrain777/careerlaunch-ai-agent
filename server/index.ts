@@ -107,6 +107,15 @@ function auth(req: AuthRequest, res: Response, next: NextFunction) {
     return `${iv.toString("hex")}:${cipher.getAuthTag().toString("hex")}:${encrypted.toString("hex")}`;
   }
 
+  function decrypt(value: string) {
+    const [ivHex, tagHex, encryptedHex] = value.split(":");
+    if (!ivHex || !tagHex || !encryptedHex) throw new Error("Stored integration token is malformed");
+    const key = crypto.createHash("sha256").update(tokenEncryptionKey).digest();
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(ivHex, "hex"));
+    decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+    return Buffer.concat([decipher.update(Buffer.from(encryptedHex, "hex")), decipher.final()]).toString("utf8");
+  }
+
   function gmailClient() {
     if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
       throw new Error("Google OAuth credentials are not configured");
@@ -116,6 +125,51 @@ function auth(req: AuthRequest, res: Response, next: NextFunction) {
 
   app.get("/api/integrations", auth, (req: AuthRequest, res) => {
     return res.json(db.prepare("SELECT provider, account_email AS accountEmail, status, last_synced_at AS lastSyncedAt FROM integration_connections WHERE user_id = ?").all(req.userId));
+  });
+
+  app.post("/api/integrations/gmail/sync", auth, async (req: AuthRequest, res) => {
+    const connection = db.prepare("SELECT * FROM integration_connections WHERE user_id = ? AND provider = 'gmail'").get(req.userId) as {
+      id: number; encrypted_access_token: string; encrypted_refresh_token?: string; scopes: string;
+    } | undefined;
+    if (!connection) return res.status(404).json({ error: "Gmail is not connected" });
+    try {
+      const client = gmailClient();
+      client.setCredentials({
+        access_token: decrypt(connection.encrypted_access_token),
+        refresh_token: connection.encrypted_refresh_token ? decrypt(connection.encrypted_refresh_token) : undefined,
+      });
+      const gmail = google.gmail({ version: "v1", auth: client });
+      const list = await gmail.users.messages.list({ userId: "me", maxResults: 25, q: "newer_than:30d" });
+      let imported = 0;
+      let skipped = 0;
+      for (const message of list.data.messages ?? []) {
+        if (!message.id) continue;
+        const existing = db.prepare("SELECT id FROM source_messages WHERE user_id = ? AND provider = 'gmail' AND external_id = ?").get(req.userId, message.id);
+        if (existing) {
+          skipped += 1;
+          continue;
+        }
+        const detail = await gmail.users.messages.get({ userId: "me", id: message.id, format: "full" });
+        const headers = detail.data.payload?.headers ?? [];
+        const header = (name: string) => headers.find((item) => item.name?.toLowerCase() === name)?.value ?? "";
+        const bodyPart = detail.data.payload?.parts?.find((part) => part.mimeType === "text/plain")?.body?.data;
+        const body = bodyPart ? Buffer.from(bodyPart, "base64url").toString("utf8") : detail.data.snippet ?? "";
+        const subject = header("subject") || "(No subject)";
+        const sender = header("from") || "(Unknown sender)";
+        const receivedAt = detail.data.internalDate ? new Date(Number(detail.data.internalDate)).toISOString() : new Date().toISOString();
+        const classification = classifyMessage(subject, body);
+        db.prepare(`
+          INSERT INTO source_messages (user_id, provider, external_id, sender, subject, body, received_at, message_type, confidence)
+          VALUES (?, 'gmail', ?, ?, ?, ?, ?, ?, ?)
+        `).run(req.userId, message.id, sender, subject, body, receivedAt, classification.type, classification.confidence);
+        imported += 1;
+      }
+      db.prepare("UPDATE integration_connections SET last_synced_at = ?, status = 'Connected' WHERE id = ?").run(new Date().toISOString(), connection.id);
+      return res.json({ imported, skipped, syncedAt: new Date().toISOString() });
+    } catch (error) {
+      db.prepare("UPDATE integration_connections SET status = 'Sync error' WHERE id = ?").run(connection.id);
+      return res.status(502).json({ error: error instanceof Error ? error.message : "Gmail sync failed" });
+    }
   });
 
   app.get("/api/integrations/gmail/connect", auth, (req: AuthRequest, res) => {
